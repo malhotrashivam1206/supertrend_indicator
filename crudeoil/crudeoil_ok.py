@@ -107,58 +107,57 @@ print(datetime.now())
 sleep(10)
 print(datetime.now())
 
+def calculate_heikin_ashi(data):
+    ha_open = (data['open'].shift() + data['close'].shift()) / 2
+    ha_close = (data['open'] + data['high'] + data['low'] + data['close']) / 4
+    ha_high = data[['high', 'open', 'close']].max(axis=1)
+    ha_low = data[['low', 'open', 'close']].min(axis=1)
+
+    ha_data = pd.DataFrame({'open': ha_open, 'high': ha_high, 'low': ha_low, 'close': ha_close})
+    ha_data['open'] = ha_data['open'].combine_first(data['open'].shift())
+    ha_data['high'] = ha_data['high'].combine_first(data['high'].shift())
+    ha_data['low'] = ha_data['low'].combine_first(data['low'].shift())
+    ha_data['close'] = ha_data['close'].combine_first(data['close'].shift())
+
+    return ha_data
+
 # Function to calculate supertrend based on ATR
-def calculate_supertrend(data, atr_period=1, multiplier=1.5, heikin_ashi=False):
+def calculate_supertrend(data, atr_period=1, factor=2.0):
+    data = data.copy()  # Create a copy of the data DataFrame
+
+    close = data['close']
     high = data['high']
     low = data['low']
-    close = data['close']
 
-    if heikin_ashi:
-        # Calculate True Range (TR) for Heikin Ashi candles
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-    else:
-        # Calculate True Range (TR) for normal candles
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
+    tr = pd.DataFrame()
+    tr['h-l'] = high - low
+    tr['h-pc'] = abs(high - close.shift())
+    tr['l-pc'] = abs(low - close.shift())
+    tr['tr'] = tr.max(axis=1)
 
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr['tr'].rolling(atr_period).mean()
 
-    # Calculate Average True Range (ATR)
-    atr = tr.rolling(atr_period).mean()
+    data['upper_band'] = (high + low) / 2 + factor * atr
+    data['lower_band'] = (high + low) / 2 - factor * atr
 
-    # Calculate basic upper and lower bands
-    basic_upper_band = (high + low) / 2 + multiplier * atr
-    basic_lower_band = (high + low) / 2 - multiplier * atr
+    supertrend = pd.Series(index=data.index)
+    direction = pd.Series(index=data.index)
 
-    # Initialize supertrend and direction columns
-    supertrend = pd.Series(data=np.nan, index=data.index)
-    direction = pd.Series(data=np.nan, index=data.index)
+    supertrend.iloc[0] = data['upper_band'].iloc[0]
+    direction.iloc[0] = 1
 
-    for i in range(atr_period, len(data)):
-        if close.iloc[i] > basic_upper_band.iloc[i - 1]:
-            supertrend.iloc[i] = basic_lower_band.iloc[i]
-            direction.iloc[i] = -1
-        elif close.iloc[i] < basic_lower_band.iloc[i - 1]:
-            supertrend.iloc[i] = basic_upper_band.iloc[i]
+    for i in range(1, len(data)):
+        if close.iloc[i] > supertrend.iloc[i - 1]:
+            supertrend.iloc[i] = max(data['lower_band'].iloc[i], supertrend.iloc[i - 1])
             direction.iloc[i] = 1
         else:
-            if direction.iloc[i - 1] == 1:
-                supertrend.iloc[i] = basic_upper_band.iloc[i]
-            else:
-                supertrend.iloc[i] = basic_lower_band.iloc[i]
-            direction.iloc[i] = direction.iloc[i - 1]
+            supertrend.iloc[i] = min(data['upper_band'].iloc[i], supertrend.iloc[i - 1])
+            direction.iloc[i] = -1
 
-    # Forward-fill NaN values in the supertrend and direction columns
-    supertrend.ffill(inplace=True)
-    direction.ffill(inplace=True)
+    data['supertrend'] = supertrend  # Add the 'supertrend' column to the data DataFrame
+    data['direction'] = direction  # Add the 'direction' column to the data DataFrame
 
-    # Combine supertrend and direction into a DataFrame
-    supertrend_data = pd.DataFrame({'supertrend': supertrend, 'direction': direction})
-
-    return supertrend_data
+    return data
 
 
 # Function to update the graph
@@ -179,15 +178,10 @@ def update_graph(n, interval, chart_type):
 
     resampled_data = df["lp"].resample(f'{interval}T').ohlc()
 
-    if len(resampled_data) > 0:
-        today_start = resampled_data.index[0].floor('D')
-        previous_day_data = df["lp"].loc[df.index.floor('D') < today_start]
+    if chart_type == 'heikin_ashi':
+        resampled_data = calculate_heikin_ashi(resampled_data)
 
-        if len(previous_day_data) > 0:
-            previous_day_last_index = previous_day_data.index[-1]
-            resampled_data = resampled_data.loc[resampled_data.index > previous_day_last_index]
-
-    supertrend_data = calculate_supertrend(resampled_data, heikin_ashi=(chart_type == 'heikin_ashi'))
+    supertrend_data = calculate_supertrend(resampled_data, factor=2.0)  # Use the new factor parameter
 
     fig = plot_candlestick(resampled_data)
 
@@ -212,30 +206,30 @@ def update_graph(n, interval, chart_type):
             trend_start = current_signal.name
 
             if current_signal['direction'] == 1:
-                buy_signals = buy_signals.append(current_signal)
-            else:
                 sell_signals = sell_signals.append(current_signal)
+            else:
+                buy_signals = buy_signals.append(current_signal)
 
     last_trend_data = resampled_data.loc[trend_start:]
     if len(last_trend_data) > 1:
         trend_lines.append((current_trend, last_trend_data))
 
     for trend, trend_data in trend_lines:
-        color = 'red' if trend == 1 else 'green'  # Change colors here (green for uptrend, red for downtrend)
+        color = 'green' if trend == 1 else 'red'  # Change colors here (green for uptrend, red for downtrend)
         fig.add_trace(go.Scatter(x=trend_data.index,
                                  y=supertrend_data.loc[trend_data.index, 'supertrend'],
                                  mode='lines',
                                  name='Trend Line',
                                  line=dict(color=color, width=2)))
 
-    fig.add_trace(go.Scatter(x=buy_signals.index,
-                             y=buy_signals['supertrend'],
+    fig.add_trace(go.Scatter(x=sell_signals.index,
+                             y=sell_signals['supertrend'],
                              mode='markers',
                              name='sell Signal',
                              marker=dict(color='red', symbol='triangle-down', size=10)))  # Change color to green
 
-    fig.add_trace(go.Scatter(x=sell_signals.index,
-                             y=sell_signals['supertrend'],
+    fig.add_trace(go.Scatter(x=buy_signals.index,
+                             y=buy_signals['supertrend'],
                              mode='markers',
                              name='buy Signal',
                              marker=dict(color='green', symbol='triangle-up', size=10)))  # Change color to red
@@ -292,7 +286,7 @@ app.layout = html.Div([
         clearable=False,
         style={'width': '150px'}
     ),
-    dcc.Interval(id='graph-update-interval', interval=200, n_intervals=0)
+    dcc.Interval(id='graph-update-interval', interval=800, n_intervals=0)
 ], style={'height': '100vh', 'width': '100vw'})
 
 
